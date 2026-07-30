@@ -19,7 +19,10 @@ import {
   ChevronRight,
   Check,
   X,
-  Filter
+  Filter,
+  Printer,
+  Eye,
+  Image as ImageIcon
 } from 'lucide-react';
 import { initializeApp } from 'firebase/app';
 import { 
@@ -96,6 +99,14 @@ const formatDateID = (dateStr) => {
   return `${days[dateObj.getDay()]}, ${parseInt(d, 10)} ${months[dateObj.getMonth()]} ${y}`;
 };
 
+// Cek apakah jadwal sudah berlalu dari waktu saat ini
+const isEventPast = (dateStr, endTimeStr) => {
+  if (!dateStr || !endTimeStr) return false;
+  const now = new Date();
+  const eventEnd = new Date(`${dateStr}T${endTimeStr}:00`);
+  return now > eventEnd;
+};
+
 export default function App() {
   const [user, setUser] = useState(null);
   const [view, setView] = useState('calendar'); 
@@ -104,9 +115,11 @@ export default function App() {
   const [rooms, setRooms] = useState(DEFAULT_ROOMS);
   const [registeredAccounts, setRegisteredAccounts] = useState([]);
   
-  // States untuk Filter & Interaksi Kalender
-  const [selectedDate, setSelectedDate] = useState(null); // Filter tanggal klik di kalender
-  const [filterDept, setFilterDept] = useState('Semua'); // Filter departemen di tabel
+  // Filter States
+  const [selectedDate, setSelectedDate] = useState(null); 
+  const [filterDept, setFilterDept] = useState('Semua'); 
+  const [filterStartDate, setFilterStartDate] = useState('');
+  const [filterEndDate, setFilterEndDate] = useState('');
   
   // Auth Form State
   const [isAuthOpen, setIsAuthOpen] = useState(false);
@@ -125,7 +138,12 @@ export default function App() {
   const [eventEndTime, setEventEndTime] = useState('11:00');
   const [eventRoom, setEventRoom] = useState(DEFAULT_ROOMS[0]);
   const [eventDesc, setEventDesc] = useState('');
+  const [eventFlyer, setEventFlyer] = useState(null);
   const [conflictWarning, setConflictWarning] = useState('');
+
+  // Detail Modal State
+  const [detailModalOpen, setDetailModalOpen] = useState(false);
+  const [selectedEvent, setSelectedEvent] = useState(null);
 
   // Settings Input State
   const [newDeptInput, setNewDeptInput] = useState('');
@@ -145,7 +163,6 @@ export default function App() {
     try {
       const querySnapshot = await getDocs(collection(db, "events"));
       const eventsList = querySnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-      // Urutkan jadwal berdasarkan tanggal dan waktu
       eventsList.sort((a, b) => new Date(a.date) - new Date(b.date) || a.startTime.localeCompare(b.startTime));
       setEvents(eventsList);
 
@@ -227,6 +244,41 @@ export default function App() {
     setAuthError('');
   };
 
+  const handleFlyerUpload = (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    
+    // Validasi ukuran agar database tidak bengkak
+    if (file.size > 2 * 1024 * 1024) {
+      alert("Ukuran flyer terlalu besar. Maksimal 2MB!");
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = (evt) => {
+      // Kompresi image via Canvas
+      const img = new Image();
+      img.onload = () => {
+        const canvas = document.createElement('canvas');
+        const MAX_WIDTH = 800;
+        let width = img.width;
+        let height = img.height;
+        if (width > MAX_WIDTH) {
+          height = Math.round((height * MAX_WIDTH) / width);
+          width = MAX_WIDTH;
+        }
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0, width, height);
+        const dataUrl = canvas.toDataURL('image/jpeg', 0.6); // 60% quality
+        setEventFlyer(dataUrl);
+      };
+      img.src = evt.target.result;
+    };
+    reader.readAsDataURL(file);
+  };
+
   const checkConflict = (date, startTime, endTime, room, excludeId = null) => {
     if (room === "Di luar gereja") return false;
     return events.some(ev => {
@@ -264,6 +316,7 @@ export default function App() {
       department: user.department,
       pic: user.name,
       description: eventDesc,
+      flyer: eventFlyer, // Simpan Data base64 Flyer
       updatedAt: new Date().toISOString()
     };
 
@@ -276,14 +329,12 @@ export default function App() {
         const docRef = await addDoc(collection(db, "events"), { ...eventData, createdAt: eventData.updatedAt });
         updatedEvents.push({ id: docRef.id, ...eventData });
       }
-      // Urutkan ulang setelah disave
       updatedEvents.sort((a, b) => new Date(a.date) - new Date(b.date) || a.startTime.localeCompare(b.startTime));
       setEvents(updatedEvents);
       
       setIsEventModalOpen(false);
       resetEventForm();
     } catch (e) {
-      // Offline fallback
       let updatedEvents = [...events];
       if (editingEventId) {
         updatedEvents = events.map(ev => ev.id === editingEventId ? { ...ev, ...eventData } : ev);
@@ -306,6 +357,7 @@ export default function App() {
     setEventEndTime(ev.endTime);
     setEventRoom(ev.room);
     setEventDesc(ev.description || '');
+    setEventFlyer(ev.flyer || null);
     setIsEventModalOpen(true);
   };
 
@@ -316,6 +368,7 @@ export default function App() {
     setEventStartTime('09:00');
     setEventEndTime('11:00');
     setEventDesc('');
+    setEventFlyer(null);
     setConflictWarning('');
   };
 
@@ -336,12 +389,20 @@ export default function App() {
 
   const isAdmin = user && user.role === 'admin';
 
-  // Menyaring event berdasarkan pilihan kalender & filter tabel
   const displayEventsCalendar = selectedDate ? events.filter(ev => ev.date === selectedDate) : events;
-  const displayEventsTable = filterDept === 'Semua' ? events : events.filter(ev => ev.department === filterDept);
+  
+  // Filter Khusus Tabel: Berdasarkan Badan Pelayan dan Rentang Tanggal
+  const displayEventsTable = events.filter(ev => {
+    const matchDept = filterDept === 'Semua' || ev.department === filterDept;
+    const matchStart = !filterStartDate || ev.date >= filterStartDate;
+    const matchEnd = !filterEndDate || ev.date <= filterEndDate;
+    return matchDept && matchStart && matchEnd;
+  });
 
+  const handlePrint = () => {
+    window.print();
+  };
 
-  // Fungsi Render Kalender Visual
   const renderCalendar = () => {
     const year = currentMonth.getFullYear();
     const month = currentMonth.getMonth();
@@ -356,7 +417,7 @@ export default function App() {
     const days = Array.from({ length: daysInMonth });
 
     return (
-      <div className="bg-white rounded-3xl p-6 shadow-md border border-blue-100 mb-8">
+      <div className="bg-white rounded-3xl p-6 shadow-md border border-blue-100 mb-8 print:hidden">
         <div className="flex justify-between items-center mb-6 px-2">
           <button onClick={prevMonth} className="p-2.5 bg-slate-50 hover:bg-blue-600 hover:text-white rounded-xl text-slate-600 transition shadow-sm">
             <ChevronLeft className="w-5 h-5" />
@@ -403,7 +464,6 @@ export default function App() {
                   {dateNum}
                 </span>
                 
-                {/* Dots penanda event */}
                 {hasEvent && (
                   <div className="absolute bottom-1.5 md:bottom-2 flex gap-1">
                     {dayEvents.slice(0, 3).map((_, idx) => (
@@ -427,12 +487,11 @@ export default function App() {
     <div className="min-h-screen bg-gradient-to-br from-slate-50 via-blue-50/50 to-indigo-50/30 text-slate-800 font-sans pb-16">
       
       {/* HEADER UTAMA */}
-      <header className="bg-gradient-to-r from-blue-900 via-blue-800 to-indigo-900 text-white shadow-xl sticky top-0 z-30 border-b-4 border-blue-600">
+      <header className="bg-gradient-to-r from-blue-900 via-blue-800 to-indigo-900 text-white shadow-xl sticky top-0 z-30 border-b-4 border-blue-600 print:hidden">
         <div className="max-w-6xl mx-auto px-6 py-5 flex flex-col md:flex-row justify-between items-center gap-5">
           
           <div className="flex items-center gap-4">
             <div className="bg-white p-1.5 rounded-xl shadow-lg w-14 h-14 flex items-center justify-center overflow-hidden shrink-0 border-2 border-blue-300/30">
-              {/* Image Google Drive */}
               <img 
                 src="https://drive.google.com/uc?export=view&id=1tD2SkJp8Ok8zCSSdbhsnSKPvVg7wqNmt" 
                 alt="Logo GKI Camar" 
@@ -492,7 +551,7 @@ export default function App() {
       </header>
 
       {/* NAVIGATION TABS */}
-      <div className="max-w-6xl mx-auto px-6 mt-8 mb-4">
+      <div className="max-w-6xl mx-auto px-6 mt-8 mb-4 print:hidden">
         <div className="flex border-b-2 border-blue-200/50 gap-8 text-sm font-bold overflow-x-auto no-scrollbar">
           <button 
             onClick={() => setView('calendar')}
@@ -520,22 +579,20 @@ export default function App() {
       </div>
 
       {/* MAIN CONTENT AREA */}
-      <main className="max-w-6xl mx-auto px-6">
+      <main className="max-w-6xl mx-auto px-6 print:m-0 print:p-0">
         
-        {/* VIEW: KALENDAR */}
+        {/* VIEW: KALENDAR GRID */}
         {view === 'calendar' && (
           <div className="space-y-2">
-            
-            {/* TAMPILAN KALENDER */}
             {renderCalendar()}
 
-            <div className="flex justify-between items-center bg-white/90 backdrop-blur-md p-6 rounded-3xl shadow-md border border-blue-100 flex-wrap gap-4 mt-8 mb-6 text-left">
+            <div className="flex justify-between items-center bg-white/90 backdrop-blur-md p-6 rounded-3xl shadow-md border border-blue-100 flex-wrap gap-4 mt-8 mb-6 text-left print:hidden">
               <div className="flex-1 min-w-[250px]">
                 <h2 className="text-xl font-black text-blue-950 uppercase tracking-wide">
                   {selectedDate ? `Agenda: ${formatDateID(selectedDate)}` : 'Daftar Agenda Kegiatan'}
                 </h2>
                 <p className="text-sm text-slate-500 font-medium mt-1">
-                  {selectedDate ? 'Menampilkan jadwal khusus di tanggal terpilih.' : 'Sistem otomatis mendeteksi bentrok ruangan secara real-time.'}
+                  {selectedDate ? 'Menampilkan jadwal di tanggal terpilih.' : 'Sistem deteksi bentrok ruangan real-time.'}
                 </p>
               </div>
 
@@ -559,7 +616,7 @@ export default function App() {
                 ) : (
                   <div className="text-xs bg-amber-50 text-amber-800 border border-amber-200/80 px-4 py-3 rounded-xl shadow-sm flex items-center gap-2 font-semibold">
                     <AlertCircle className="w-4 h-4 text-amber-600 shrink-0" />
-                    <span>Silakan <b>Login</b> untuk mengelola jadwal kegiatan.</span>
+                    <span>Silakan <b>Login</b> untuk mengelola jadwal.</span>
                   </div>
                 )}
               </div>
@@ -572,161 +629,234 @@ export default function App() {
                   <p className="text-base font-bold text-slate-500">Tidak ada agenda di tanggal ini.</p>
                 </div>
               ) : (
-                displayEventsCalendar.map((ev) => (
-                  <div key={ev.id} className="bg-white rounded-3xl p-6 shadow-md hover:shadow-xl hover:-translate-y-1 border border-blue-50 flex flex-col justify-between transition-all duration-300 relative group text-left">
-                    <div>
-                      <div className="flex justify-between items-start gap-2 mb-4">
-                        <span className="bg-blue-50 text-blue-800 text-xs font-black uppercase tracking-wide px-3.5 py-1.5 rounded-xl border border-blue-100/60 shadow-sm">
-                          {ev.department}
-                        </span>
-                        {(isAdmin || (user && user.department === ev.department)) && (
+                displayEventsCalendar.map((ev) => {
+                  const past = isEventPast(ev.date, ev.endTime);
+                  
+                  return (
+                    <div key={ev.id} className={`rounded-3xl p-6 shadow-md hover:shadow-xl hover:-translate-y-1 border flex flex-col justify-between transition-all duration-300 relative text-left
+                      ${past ? 'bg-slate-50 border-slate-200 opacity-80' : 'bg-white border-blue-50'}
+                    `}>
+                      <div>
+                        <div className="flex justify-between items-start gap-2 mb-4">
+                          <span className={`text-xs font-black uppercase tracking-wide px-3.5 py-1.5 rounded-xl border shadow-sm
+                            ${past ? 'bg-slate-200 text-slate-500 border-slate-300' : 'bg-blue-50 text-blue-800 border-blue-100/60'}
+                          `}>
+                            {ev.department}
+                          </span>
+                          
                           <div className="flex gap-1.5">
+                            {/* Tombol Detail/Flyer */}
                             <button 
-                              onClick={() => openEditModal(ev)}
-                              className="text-slate-400 hover:text-white bg-slate-50 hover:bg-blue-500 p-2 rounded-xl transition shadow-sm"
-                              title="Edit Jadwal"
+                              onClick={() => { setSelectedEvent(ev); setDetailModalOpen(true); }}
+                              className="text-blue-500 hover:text-white bg-blue-50 hover:bg-blue-600 p-2 rounded-xl transition shadow-sm"
+                              title="Lihat Detail & Flyer"
                             >
-                              <Edit2 className="w-4 h-4" />
+                              <Eye className="w-4 h-4" />
                             </button>
-                            <button 
-                              onClick={() => handleDeleteEvent(ev.id, ev.department)}
-                              className="text-slate-400 hover:text-white bg-slate-50 hover:bg-rose-500 p-2 rounded-xl transition shadow-sm"
-                              title="Hapus Jadwal"
-                            >
-                              <Trash2 className="w-4 h-4" />
-                            </button>
+
+                            {(isAdmin || (user && user.department === ev.department)) && (
+                              <>
+                                <button 
+                                  onClick={() => openEditModal(ev)}
+                                  className="text-slate-400 hover:text-white bg-slate-50 hover:bg-blue-500 p-2 rounded-xl transition shadow-sm"
+                                  title="Edit Jadwal"
+                                >
+                                  <Edit2 className="w-4 h-4" />
+                                </button>
+                                <button 
+                                  onClick={() => handleDeleteEvent(ev.id, ev.department)}
+                                  className="text-slate-400 hover:text-white bg-slate-50 hover:bg-rose-500 p-2 rounded-xl transition shadow-sm"
+                                  title="Hapus Jadwal"
+                                >
+                                  <Trash2 className="w-4 h-4" />
+                                </button>
+                              </>
+                            )}
+                          </div>
+                        </div>
+
+                        <h3 className={`font-black text-lg mb-4 leading-tight ${past ? 'text-slate-500' : 'text-blue-950 drop-shadow-sm'}`}>
+                          {ev.title}
+                        </h3>
+                        
+                        <div className={`space-y-3 text-sm mb-5 p-4 rounded-2xl border ${past ? 'bg-slate-100/50 border-slate-200 text-slate-500' : 'text-slate-600 bg-slate-50/80 border-slate-100'}`}>
+                          <div className="flex items-start gap-3">
+                            <CalendarIcon className={`w-4 h-4 shrink-0 mt-0.5 ${past ? 'text-slate-400' : 'text-blue-600'}`} />
+                            <span className="font-bold">{formatDateID(ev.date)}</span>
+                          </div>
+                          <div className="flex items-start gap-3">
+                            <Clock className={`w-4 h-4 shrink-0 mt-0.5 ${past ? 'text-slate-400' : 'text-blue-600'}`} />
+                            <span className="font-semibold">{ev.startTime} - {ev.endTime} WIB</span>
+                          </div>
+                          <div className="flex items-start gap-3">
+                            <MapPin className={`w-4 h-4 shrink-0 mt-0.5 ${past ? 'text-slate-400' : 'text-blue-600'}`} />
+                            <span className={`font-bold ${past ? 'text-slate-500' : 'text-blue-900'}`}>{ev.room}</span>
+                          </div>
+                        </div>
+
+                        {ev.description && (
+                          <div className={`p-4 rounded-2xl mb-5 border ${past ? 'bg-slate-100 border-slate-200' : 'bg-blue-50/50 border-blue-100/50'}`}>
+                            <p className="text-sm whitespace-pre-wrap leading-relaxed font-medium line-clamp-3">
+                              {ev.description}
+                            </p>
                           </div>
                         )}
                       </div>
 
-                      <h3 className="font-black text-blue-950 text-lg mb-4 leading-tight drop-shadow-sm">{ev.title}</h3>
-                      
-                      <div className="space-y-3 text-sm text-slate-600 mb-5 bg-slate-50/80 p-4 rounded-2xl border border-slate-100">
-                        <div className="flex items-start gap-3">
-                          <CalendarIcon className="w-4 h-4 text-blue-600 shrink-0 mt-0.5" />
-                          <span className="font-bold text-slate-800">{formatDateID(ev.date)}</span>
-                        </div>
-                        <div className="flex items-start gap-3">
-                          <Clock className="w-4 h-4 text-blue-600 shrink-0 mt-0.5" />
-                          <span className="font-semibold text-slate-700">{ev.startTime} - {ev.endTime} WIB</span>
-                        </div>
-                        <div className="flex items-start gap-3">
-                          <MapPin className="w-4 h-4 text-blue-600 shrink-0 mt-0.5" />
-                          <span className="font-bold text-blue-900">{ev.room}</span>
-                        </div>
+                      <div className="border-t-2 border-slate-100 pt-4 flex justify-between items-center text-xs font-semibold">
+                        <span className="text-slate-400">PIC: <strong className="text-slate-700">{ev.pic}</strong></span>
+                        {past ? (
+                          <span className="flex items-center gap-1.5 text-slate-500 bg-slate-200 px-2.5 py-1 rounded-lg">
+                            Selesai
+                          </span>
+                        ) : (
+                          <span className="flex items-center gap-1.5 text-blue-700 bg-blue-100/50 px-2.5 py-1 rounded-lg">
+                            <CheckCircle className="w-3.5 h-3.5" /> Terkonfirmasi
+                          </span>
+                        )}
                       </div>
-
-                      {ev.description && (
-                        <div className="bg-blue-50/50 p-4 rounded-2xl mb-5 border border-blue-100/50">
-                          <p className="text-sm text-slate-600 whitespace-pre-wrap leading-relaxed font-medium">
-                            {ev.description}
-                          </p>
-                        </div>
-                      )}
                     </div>
-
-                    <div className="border-t-2 border-slate-100 pt-4 flex justify-between items-center text-xs text-slate-400 font-semibold">
-                      <span>PIC: <strong className="text-slate-700">{ev.pic}</strong></span>
-                      <span className="flex items-center gap-1.5 text-blue-700 bg-blue-100/50 px-2.5 py-1 rounded-lg">
-                        <CheckCircle className="w-3.5 h-3.5" /> Terkonfirmasi
-                      </span>
-                    </div>
-                  </div>
-                ))
+                  );
+                })
               )}
             </div>
           </div>
         )}
 
-        {/* VIEW: TABEL KEGIATAN */}
+        {/* VIEW: TABEL KANBAN / LIST */}
         {view === 'kanban' && (
           <div className="bg-white rounded-3xl shadow-lg border border-blue-100 overflow-hidden">
-            <div className="p-6 border-b-2 border-slate-100 bg-slate-50/50 flex justify-between items-center flex-wrap gap-4 text-left">
-              <div className="flex-1 min-w-[300px]">
-                <h2 className="text-xl font-black text-blue-950 uppercase tracking-wide">Daftar Jadwal Kegiatan GKI Camar</h2>
-                <p className="text-sm text-rose-600 font-semibold mt-1">
-                  *Apabila ada kekeliruan dalam jadwal, mohon dapat diberitahukan kepada Majelis Jemaat.
-                </p>
-              </div>
-
-              <div className="flex items-center gap-4 w-full md:w-auto">
-                {/* FILTER DROPDOWN */}
-                <div className="relative w-full md:w-56">
-                  <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
-                    <Filter className="w-4 h-4 text-slate-400" />
-                  </div>
-                  <select 
-                    value={filterDept}
-                    onChange={(e) => setFilterDept(e.target.value)}
-                    className="w-full pl-9 pr-4 py-2.5 border-2 border-slate-200 rounded-xl text-sm font-bold text-slate-700 bg-white focus:outline-none focus:border-blue-500 focus:ring-0 cursor-pointer appearance-none"
-                  >
-                    <option value="Semua">Semua Badan Pelayan</option>
-                    {departments.map((d, i) => (
-                      <option key={i} value={d}>{d}</option>
-                    ))}
-                  </select>
+            <div className="p-6 border-b-2 border-slate-100 bg-slate-50/50 text-left print:hidden">
+              <div className="flex flex-col lg:flex-row justify-between lg:items-center gap-4">
+                <div className="flex-1">
+                  <h2 className="text-xl font-black text-blue-950 uppercase tracking-wide">Daftar Jadwal Kegiatan GKI Camar</h2>
+                  <p className="text-sm text-rose-600 font-semibold mt-1">
+                    *Apabila ada kekeliruan dalam jadwal, mohon dapat diberitahukan kepada Majelis Jemaat.
+                  </p>
                 </div>
+                
+                {/* Header Actions & Filters */}
+                <div className="flex flex-wrap items-center gap-3">
+                  <div className="flex items-center gap-2 bg-white border-2 border-slate-200 rounded-xl px-3 py-1.5">
+                    <span className="text-xs font-bold text-slate-500 uppercase">Dari:</span>
+                    <input type="date" value={filterStartDate} onChange={(e) => setFilterStartDate(e.target.value)} className="text-xs font-bold text-slate-700 focus:outline-none bg-transparent"/>
+                    <span className="text-xs font-bold text-slate-500 uppercase ml-1">S/D:</span>
+                    <input type="date" value={filterEndDate} onChange={(e) => setFilterEndDate(e.target.value)} className="text-xs font-bold text-slate-700 focus:outline-none bg-transparent"/>
+                  </div>
 
-                {user && (
+                  <div className="relative min-w-[180px]">
+                    <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                      <Filter className="w-4 h-4 text-slate-400" />
+                    </div>
+                    <select 
+                      value={filterDept}
+                      onChange={(e) => setFilterDept(e.target.value)}
+                      className="w-full pl-9 pr-4 py-2.5 border-2 border-slate-200 rounded-xl text-sm font-bold text-slate-700 bg-white focus:outline-none focus:border-blue-500 focus:ring-0 cursor-pointer appearance-none"
+                    >
+                      <option value="Semua">Semua Badan Pelayan</option>
+                      {departments.map((d, i) => (
+                        <option key={i} value={d}>{d}</option>
+                      ))}
+                    </select>
+                  </div>
+
                   <button
-                    onClick={() => { resetEventForm(); setIsEventModalOpen(true); }}
-                    className="shrink-0 flex items-center gap-2 bg-blue-700 hover:bg-blue-800 text-white px-5 py-2.5 rounded-xl text-xs font-bold shadow-lg shadow-blue-700/30 transition"
+                    onClick={handlePrint}
+                    className="flex items-center gap-2 bg-slate-800 hover:bg-slate-900 text-white px-4 py-2.5 rounded-xl text-xs font-bold shadow-md transition"
+                    title="Cetak Mading / PDF"
                   >
-                    <Plus className="w-4 h-4" /> Jadwal Baru
+                    <Printer className="w-4 h-4" /> Cetak
                   </button>
-                )}
+
+                  {user && (
+                    <button
+                      onClick={() => { resetEventForm(); setIsEventModalOpen(true); }}
+                      className="flex items-center gap-2 bg-blue-700 hover:bg-blue-800 text-white px-4 py-2.5 rounded-xl text-xs font-bold shadow-lg transition"
+                    >
+                      <Plus className="w-4 h-4" /> Jadwal Baru
+                    </button>
+                  )}
+                </div>
               </div>
             </div>
+            
+            {/* Tampilan Khusus Cetak Mading Header */}
+            <div className="hidden print:block text-center p-6 pb-2">
+              <h1 className="text-2xl font-black uppercase text-black">Jadwal Kegiatan GKI Camar</h1>
+              {filterStartDate || filterEndDate ? (
+                <p className="font-bold text-gray-700 text-sm mt-1">Periode: {formatDateID(filterStartDate)} - {formatDateID(filterEndDate)}</p>
+              ) : null}
+            </div>
+
             <div className="overflow-x-auto">
               <table className="w-full text-left text-sm">
-                <thead className="bg-slate-100 text-slate-600 uppercase font-black tracking-wider border-b-2 border-slate-200">
+                <thead className="bg-slate-100 text-slate-600 uppercase font-black tracking-wider border-b-2 border-slate-200 print:bg-white print:text-black print:border-b-4 print:border-black">
                   <tr>
                     <th className="p-5">Tanggal & Waktu</th>
                     <th className="p-5">Nama Kegiatan</th>
                     <th className="p-5">Badan Pelayan</th>
                     <th className="p-5">Ruangan</th>
-                    <th className="p-5">PIC</th>
-                    <th className="p-5 text-right">Aksi</th>
+                    <th className="p-5">PIC / Status</th>
+                    <th className="p-5 text-right print:hidden">Aksi</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-slate-100">
+                <tbody className="divide-y divide-slate-100 print:divide-gray-300">
                   {displayEventsTable.length === 0 ? (
                     <tr>
-                      <td colSpan="6" className="p-10 text-center font-bold text-slate-400 text-base">Belum ada data jadwal tercatat untuk pilihan ini.</td>
+                      <td colSpan="6" className="p-10 text-center font-bold text-slate-400 text-base print:text-black">Belum ada data jadwal.</td>
                     </tr>
                   ) : (
-                    displayEventsTable.map((ev) => (
-                      <tr key={ev.id} className="hover:bg-blue-50/50 transition">
-                        <td className="p-5 font-bold text-slate-800 whitespace-nowrap">
-                          {formatDateID(ev.date)}<br/>
-                          <span className="text-blue-600 font-semibold">{ev.startTime} - {ev.endTime} WIB</span>
-                        </td>
-                        <td className="p-5 font-black text-blue-950 text-base">{ev.title}</td>
-                        <td className="p-5"><span className="bg-blue-100 text-blue-800 px-3 py-1.5 rounded-lg text-xs font-bold whitespace-nowrap">{ev.department}</span></td>
-                        <td className="p-5 font-bold text-slate-700">{ev.room}</td>
-                        <td className="p-5 font-semibold text-slate-500">{ev.pic}</td>
-                        <td className="p-5 text-right whitespace-nowrap">
-                          {(isAdmin || (user && user.department === ev.department)) && (
+                    displayEventsTable.map((ev) => {
+                      const past = isEventPast(ev.date, ev.endTime);
+                      return (
+                        <tr key={ev.id} className={`transition ${past ? 'bg-slate-50/50 grayscale-[30%] print:grayscale-0 print:opacity-60' : 'hover:bg-blue-50/50'}`}>
+                          <td className="p-5 font-bold text-slate-800 whitespace-nowrap print:text-black">
+                            {formatDateID(ev.date)}<br/>
+                            <span className="text-blue-600 font-semibold print:text-gray-800">{ev.startTime} - {ev.endTime} WIB</span>
+                          </td>
+                          <td className="p-5 font-black text-blue-950 text-base print:text-black">{ev.title}</td>
+                          <td className="p-5"><span className="bg-blue-100 text-blue-800 px-3 py-1.5 rounded-lg text-xs font-bold whitespace-nowrap print:bg-transparent print:border print:border-black print:text-black">{ev.department}</span></td>
+                          <td className="p-5 font-bold text-slate-700 print:text-black">{ev.room}</td>
+                          <td className="p-5">
+                            <span className="font-semibold text-slate-600 print:text-black">{ev.pic}</span><br/>
+                            {past ? (
+                              <span className="text-[10px] uppercase font-bold text-slate-400 print:text-gray-500">Selesai</span>
+                            ) : (
+                              <span className="text-[10px] uppercase font-bold text-blue-600 print:text-black">Terkonfirmasi</span>
+                            )}
+                          </td>
+                          <td className="p-5 text-right whitespace-nowrap print:hidden">
                             <div className="flex justify-end gap-2">
                               <button 
-                                onClick={() => openEditModal(ev)}
+                                onClick={() => { setSelectedEvent(ev); setDetailModalOpen(true); }}
                                 className="text-slate-400 hover:text-blue-600 hover:bg-blue-100 p-2.5 rounded-xl transition shadow-sm bg-white border border-slate-200"
-                                title="Edit"
+                                title="Lihat Detail / Flyer"
                               >
-                                <Edit2 className="w-4 h-4" />
+                                <Eye className="w-4 h-4" />
                               </button>
-                              <button 
-                                onClick={() => handleDeleteEvent(ev.id, ev.department)}
-                                className="text-slate-400 hover:text-rose-600 hover:bg-rose-100 p-2.5 rounded-xl transition shadow-sm bg-white border border-slate-200"
-                                title="Hapus"
-                              >
-                                <Trash2 className="w-4 h-4" />
-                              </button>
+                              {(isAdmin || (user && user.department === ev.department)) && (
+                                <>
+                                  <button 
+                                    onClick={() => openEditModal(ev)}
+                                    className="text-slate-400 hover:text-blue-600 hover:bg-blue-100 p-2.5 rounded-xl transition shadow-sm bg-white border border-slate-200"
+                                    title="Edit"
+                                  >
+                                    <Edit2 className="w-4 h-4" />
+                                  </button>
+                                  <button 
+                                    onClick={() => handleDeleteEvent(ev.id, ev.department)}
+                                    className="text-slate-400 hover:text-rose-600 hover:bg-rose-100 p-2.5 rounded-xl transition shadow-sm bg-white border border-slate-200"
+                                    title="Hapus"
+                                  >
+                                    <Trash2 className="w-4 h-4" />
+                                  </button>
+                                </>
+                              )}
                             </div>
-                          )}
-                        </td>
-                      </tr>
-                    ))
+                          </td>
+                        </tr>
+                      )
+                    })
                   )}
                 </tbody>
               </table>
@@ -736,8 +866,7 @@ export default function App() {
 
         {/* VIEW: SETTINGS (ADMIN ONLY) */}
         {view === 'settings' && isAdmin && (
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-            
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-8 print:hidden">
             {/* Kelola Badan Pelayan */}
             <div className="bg-white rounded-3xl shadow-md border border-blue-100 p-8 text-left">
               <h2 className="text-lg font-black text-blue-950 mb-6 flex items-center gap-3 uppercase tracking-wide">
@@ -746,7 +875,6 @@ export default function App() {
               <div className="space-y-3 mb-6 max-h-[400px] overflow-y-auto pr-2 custom-scrollbar">
                 {departments.map((dept, idx) => (
                   <div key={idx} className="flex justify-between items-center bg-slate-50 px-4 py-3 rounded-2xl text-sm border border-slate-200/60">
-                    
                     {editingDeptIdx === idx ? (
                       <div className="flex items-center gap-2 w-full">
                         <input 
@@ -770,18 +898,10 @@ export default function App() {
                         <span className="font-bold text-slate-700">{dept}</span>
                         {dept !== "Majelis Jemaat" && (
                           <div className="flex gap-2">
-                            <button 
-                              onClick={() => { setEditingDeptIdx(idx); setEditDeptValue(dept); }}
-                              className="text-slate-400 hover:text-blue-600 p-1.5 transition"
-                              title="Edit"
-                            >
+                            <button onClick={() => { setEditingDeptIdx(idx); setEditDeptValue(dept); }} className="text-slate-400 hover:text-blue-600 p-1.5 transition" title="Edit">
                               <Edit2 className="w-4 h-4" />
                             </button>
-                            <button 
-                              onClick={() => setDepartments(departments.filter((_, i) => i !== idx))}
-                              className="text-slate-400 hover:text-rose-600 p-1.5 transition"
-                              title="Hapus"
-                            >
+                            <button onClick={() => setDepartments(departments.filter((_, i) => i !== idx))} className="text-slate-400 hover:text-rose-600 p-1.5 transition" title="Hapus">
                               <Trash2 className="w-4 h-4" />
                             </button>
                           </div>
@@ -821,7 +941,6 @@ export default function App() {
               <div className="space-y-3 mb-6 max-h-[400px] overflow-y-auto pr-2 custom-scrollbar">
                 {rooms.map((room, idx) => (
                   <div key={idx} className="flex justify-between items-center bg-slate-50 px-4 py-3 rounded-2xl text-sm border border-slate-200/60">
-                    
                     {editingRoomIdx === idx ? (
                       <div className="flex items-center gap-2 w-full">
                         <input 
@@ -844,18 +963,10 @@ export default function App() {
                       <>
                         <span className="font-bold text-slate-700">{room}</span>
                         <div className="flex gap-2">
-                          <button 
-                            onClick={() => { setEditingRoomIdx(idx); setEditRoomValue(room); }}
-                            className="text-slate-400 hover:text-blue-600 p-1.5 transition"
-                            title="Edit"
-                          >
+                          <button onClick={() => { setEditingRoomIdx(idx); setEditRoomValue(room); }} className="text-slate-400 hover:text-blue-600 p-1.5 transition" title="Edit">
                             <Edit2 className="w-4 h-4" />
                           </button>
-                          <button 
-                            onClick={() => setRooms(rooms.filter((_, i) => i !== idx))}
-                            className="text-slate-400 hover:text-rose-600 p-1.5 transition"
-                            title="Hapus"
-                          >
+                          <button onClick={() => setRooms(rooms.filter((_, i) => i !== idx))} className="text-slate-400 hover:text-rose-600 p-1.5 transition" title="Hapus">
                             <Trash2 className="w-4 h-4" />
                           </button>
                         </div>
@@ -972,7 +1083,7 @@ export default function App() {
       {/* MODAL FORM JADWAL (BUAT & EDIT) */}
       {isEventModalOpen && (
         <div className="fixed inset-0 bg-slate-900/70 backdrop-blur-md z-50 flex items-center justify-center p-4 overflow-y-auto">
-          <div className="bg-white rounded-3xl shadow-2xl max-w-lg w-full p-8 border border-blue-100 my-8 text-left">
+          <div className="bg-white rounded-3xl shadow-2xl max-w-2xl w-full p-8 border border-blue-100 my-8 text-left">
             <div className="flex justify-between items-center mb-6">
               <h3 className="font-black text-blue-950 text-lg uppercase tracking-wide">
                 {editingEventId ? 'Edit Jadwal Kegiatan' : 'Form Pembuatan Jadwal'}
@@ -1048,11 +1159,31 @@ export default function App() {
                 </div>
               </div>
 
+              {/* Upload Flyer/Poster */}
               <div>
-                <label className="block text-xs font-black text-slate-500 mb-2 uppercase tracking-wider">Catatan Tambahan</label>
+                <label className="block text-xs font-black text-slate-500 mb-2 uppercase tracking-wider">Upload Flyer / Poster (Opsional)</label>
+                <div className="flex items-center gap-4">
+                  <label className="flex items-center gap-2 bg-blue-50 text-blue-700 border-2 border-blue-200 px-4 py-3 rounded-xl cursor-pointer hover:bg-blue-100 transition font-bold text-sm">
+                    <ImageIcon className="w-4 h-4" /> Pilih Gambar...
+                    <input type="file" accept="image/*" onChange={handleFlyerUpload} className="hidden" />
+                  </label>
+                  {eventFlyer && (
+                    <div className="flex items-center gap-2">
+                      <div className="w-12 h-12 rounded-lg overflow-hidden border-2 border-slate-200">
+                        <img src={eventFlyer} alt="Flyer Preview" className="w-full h-full object-cover" />
+                      </div>
+                      <button type="button" onClick={() => setEventFlyer(null)} className="text-rose-500 text-xs font-bold hover:underline">Hapus</button>
+                    </div>
+                  )}
+                </div>
+                <p className="text-xs text-slate-400 mt-2 font-medium">*Poster akan dikompresi otomatis (Maksimal 2MB).</p>
+              </div>
+
+              <div>
+                <label className="block text-xs font-black text-slate-500 mb-2 uppercase tracking-wider">Catatan Tambahan (Bisa multi baris)</label>
                 <textarea 
                   rows="3"
-                  placeholder="Keterangan tambahan (Bisa multi-baris)..." 
+                  placeholder="Keterangan acara / Info konsumsi dll..." 
                   value={eventDesc}
                   onChange={(e) => setEventDesc(e.target.value)}
                   className="w-full border-2 border-slate-200 rounded-2xl p-3.5 text-sm focus:border-blue-600 focus:outline-none bg-slate-50/50 font-medium text-slate-700 resize-y"
@@ -1066,6 +1197,77 @@ export default function App() {
                 {editingEventId ? 'Simpan Perubahan Jadwal' : 'Simpan & Cek Konflik'}
               </button>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL LIHAT DETAIL & FLYER */}
+      {detailModalOpen && selectedEvent && (
+        <div className="fixed inset-0 bg-slate-900/80 backdrop-blur-sm z-50 flex items-center justify-center p-4 z-50 overflow-y-auto">
+          <div className="bg-white rounded-3xl shadow-2xl max-w-2xl w-full my-8 text-left overflow-hidden border border-slate-200">
+            {/* Header Modal */}
+            <div className="bg-slate-50 p-6 flex justify-between items-center border-b border-slate-200">
+              <h3 className="font-black text-blue-950 text-lg uppercase tracking-wide">Detail Kegiatan</h3>
+              <button onClick={() => { setDetailModalOpen(false); setSelectedEvent(null); }} className="text-slate-400 hover:text-rose-500 bg-white shadow-sm p-2 rounded-full font-bold transition">✕</button>
+            </div>
+            
+            <div className="p-6 md:p-8">
+              <div className="flex justify-between items-start mb-4">
+                <span className="bg-blue-100 text-blue-800 px-3.5 py-1.5 rounded-xl text-xs font-black uppercase tracking-wide">
+                  {selectedEvent.department}
+                </span>
+                {isEventPast(selectedEvent.date, selectedEvent.endTime) && (
+                  <span className="bg-slate-200 text-slate-500 px-3.5 py-1.5 rounded-xl text-xs font-black uppercase tracking-wide">
+                    Telah Selesai
+                  </span>
+                )}
+              </div>
+
+              <h2 className="text-2xl font-black text-slate-800 mb-6">{selectedEvent.title}</h2>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
+                <div className="bg-slate-50 p-4 rounded-2xl border border-slate-100">
+                  <p className="text-xs font-bold text-slate-400 uppercase mb-1">Tanggal</p>
+                  <p className="font-bold text-slate-700 flex items-center gap-2">
+                    <CalendarIcon className="w-4 h-4 text-blue-600" /> {formatDateID(selectedEvent.date)}
+                  </p>
+                </div>
+                <div className="bg-slate-50 p-4 rounded-2xl border border-slate-100">
+                  <p className="text-xs font-bold text-slate-400 uppercase mb-1">Waktu</p>
+                  <p className="font-bold text-slate-700 flex items-center gap-2">
+                    <Clock className="w-4 h-4 text-blue-600" /> {selectedEvent.startTime} - {selectedEvent.endTime} WIB
+                  </p>
+                </div>
+                <div className="bg-slate-50 p-4 rounded-2xl border border-slate-100 md:col-span-2">
+                  <p className="text-xs font-bold text-slate-400 uppercase mb-1">Ruangan & Lokasi</p>
+                  <p className="font-bold text-blue-900 flex items-center gap-2">
+                    <MapPin className="w-4 h-4 text-blue-600" /> {selectedEvent.room}
+                  </p>
+                </div>
+              </div>
+
+              {selectedEvent.description && (
+                <div className="mb-6">
+                  <p className="text-xs font-bold text-slate-400 uppercase mb-2">Keterangan Tambahan</p>
+                  <div className="bg-blue-50/50 p-4 rounded-2xl border border-blue-100 text-sm font-medium text-slate-600 whitespace-pre-wrap leading-relaxed">
+                    {selectedEvent.description}
+                  </div>
+                </div>
+              )}
+
+              {selectedEvent.flyer && (
+                <div className="mt-6 border-t border-slate-100 pt-6">
+                  <p className="text-xs font-bold text-slate-400 uppercase mb-4 text-center">Flyer / Poster Acara</p>
+                  <div className="rounded-2xl overflow-hidden shadow-lg border border-slate-200">
+                    <img src={selectedEvent.flyer} alt="Flyer Kegiatan" className="w-full h-auto object-contain bg-slate-100" />
+                  </div>
+                </div>
+              )}
+
+              <div className="mt-8 flex justify-end text-xs font-semibold text-slate-400">
+                <p>Diajukan oleh (PIC): <span className="text-slate-700">{selectedEvent.pic}</span></p>
+              </div>
+            </div>
           </div>
         </div>
       )}
