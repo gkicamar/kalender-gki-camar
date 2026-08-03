@@ -153,6 +153,13 @@ export default function App() {
   const [editingRoomIdx, setEditingRoomIdx] = useState(null);
   const [editRoomValue, setEditRoomValue] = useState('');
 
+  // Kelola Akun (PIC) State
+  const [editingAccountId, setEditingAccountId] = useState(null);
+  const [editAccountName, setEditAccountName] = useState('');
+  const [editAccountPass, setEditAccountPass] = useState('');
+  const [editAccountDept, setEditAccountDept] = useState('');
+  const [accountSearch, setAccountSearch] = useState('');
+
   const [currentMonth, setCurrentMonth] = useState(new Date());
 
   useEffect(() => {
@@ -387,6 +394,77 @@ export default function App() {
     }
   };
 
+  const openEditAccount = (acc) => {
+    setEditingAccountId(acc.id);
+    setEditAccountName(acc.name);
+    setEditAccountPass(acc.password);
+    setEditAccountDept(acc.department);
+  };
+
+  const cancelEditAccount = () => {
+    setEditingAccountId(null);
+    setEditAccountName('');
+    setEditAccountPass('');
+    setEditAccountDept('');
+  };
+
+  const handleSaveAccount = async (accId) => {
+    if (!editAccountName.trim() || !editAccountPass.trim()) {
+      alert('Nama PIC dan Password wajib diisi!');
+      return;
+    }
+
+    const cleanName = editAccountName.trim().toLowerCase();
+    const duplicate = registeredAccounts.find(
+      acc => acc.id !== accId && acc.name.toLowerCase() === cleanName
+    );
+    if (duplicate) {
+      alert('Nama PIC ini sudah dipakai akun lain! Silakan gunakan nama lain.');
+      return;
+    }
+
+    const updatedData = {
+      name: editAccountName.trim(),
+      password: editAccountPass,
+      department: editAccountDept,
+      role: editAccountDept === "Majelis Jemaat" ? "admin" : "member"
+    };
+
+    try {
+      await updateDoc(doc(db, "accounts", accId), updatedData);
+    } catch (e) {
+      // Tetap update lokal walau offline
+    }
+
+    const updatedAccounts = registeredAccounts.map(acc =>
+      acc.id === accId ? { ...acc, ...updatedData } : acc
+    );
+    setRegisteredAccounts(updatedAccounts);
+
+    // Jika akun yang diedit adalah akun yang sedang login, sinkronkan sesi login saat ini
+    const editedAccBefore = registeredAccounts.find(acc => acc.id === accId);
+    if (user && editedAccBefore && user.name === editedAccBefore.name) {
+      setUser({ department: updatedData.department, name: updatedData.name, role: updatedData.role });
+    }
+
+    cancelEditAccount();
+  };
+
+  const handleDeleteAccount = async (acc) => {
+    if (acc.department === "Majelis Jemaat" && registeredAccounts.filter(a => a.department === "Majelis Jemaat").length <= 1) {
+      alert('Tidak bisa menghapus. Minimal harus ada 1 akun Majelis Jemaat aktif.');
+      return;
+    }
+    if (!window.confirm(`Yakin ingin menghapus akun "${acc.name}" (${acc.department})?`)) return;
+
+    try {
+      await deleteDoc(doc(db, "accounts", acc.id));
+    } catch (e) {
+      // Tetap hapus lokal walau offline
+    }
+    setRegisteredAccounts(registeredAccounts.filter(a => a.id !== acc.id));
+  };
+
   const isAdmin = user && user.role === 'admin';
 
   const displayEventsCalendar = selectedDate ? events.filter(ev => ev.date === selectedDate) : events;
@@ -402,6 +480,13 @@ export default function App() {
   const handlePrint = () => {
     window.print();
   };
+
+  // Filter Kelola Akun berdasarkan pencarian nama/badan pelayan
+  const displayAccounts = registeredAccounts.filter(acc => {
+    const q = accountSearch.trim().toLowerCase();
+    if (!q) return true;
+    return acc.name.toLowerCase().includes(q) || acc.department.toLowerCase().includes(q);
+  });
 
   const renderCalendar = () => {
     const year = currentMonth.getFullYear();
@@ -995,6 +1080,143 @@ export default function App() {
                   Tambah
                 </button>
               </div>
+            </div>
+
+            {/* Kelola Akun (PIC) - Khusus Majelis Jemaat */}
+            <div className="bg-white rounded-3xl shadow-md border border-blue-100 p-8 text-left md:col-span-2">
+              <div className="flex flex-col md:flex-row justify-between md:items-center gap-4 mb-6">
+                <h2 className="text-lg font-black text-blue-950 flex items-center gap-3 uppercase tracking-wide">
+                  <Shield className="w-6 h-6 text-blue-600" /> Kelola Akun (PIC)
+                </h2>
+                <input
+                  type="text"
+                  placeholder="Cari nama PIC / Badan Pelayan..."
+                  value={accountSearch}
+                  onChange={(e) => setAccountSearch(e.target.value)}
+                  className="w-full md:w-72 border-2 border-slate-200 rounded-xl px-4 py-2.5 text-sm font-semibold focus:outline-none focus:border-blue-500"
+                />
+              </div>
+
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-sm">
+                  <thead className="bg-slate-50 text-slate-500 uppercase font-black tracking-wider border-b-2 border-slate-200">
+                    <tr>
+                      <th className="p-3">Nama PIC</th>
+                      <th className="p-3">Badan Pelayan</th>
+                      <th className="p-3">Password</th>
+                      <th className="p-3">Role</th>
+                      <th className="p-3 text-right">Aksi</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {displayAccounts.length === 0 ? (
+                      <tr>
+                        <td colSpan="5" className="p-8 text-center font-bold text-slate-400">
+                          {accountSearch ? 'Akun tidak ditemukan.' : 'Belum ada akun terdaftar.'}
+                        </td>
+                      </tr>
+                    ) : (
+                      displayAccounts.map((acc) => (
+                        <tr key={acc.id} className="hover:bg-blue-50/40 transition">
+                          {editingAccountId === acc.id ? (
+                            <>
+                              <td className="p-3">
+                                <input
+                                  type="text"
+                                  value={editAccountName}
+                                  onChange={(e) => setEditAccountName(e.target.value)}
+                                  className="w-full border-2 border-blue-300 rounded-xl px-3 py-2 text-sm font-bold text-slate-800 focus:outline-none focus:border-blue-600"
+                                />
+                              </td>
+                              <td className="p-3">
+                                <select
+                                  value={editAccountDept}
+                                  onChange={(e) => setEditAccountDept(e.target.value)}
+                                  className="w-full border-2 border-blue-300 rounded-xl px-3 py-2 text-sm font-bold text-slate-800 focus:outline-none focus:border-blue-600"
+                                >
+                                  {departments.map((d, i) => (
+                                    <option key={i} value={d}>{d}</option>
+                                  ))}
+                                </select>
+                              </td>
+                              <td className="p-3">
+                                <input
+                                  type="text"
+                                  value={editAccountPass}
+                                  onChange={(e) => setEditAccountPass(e.target.value)}
+                                  placeholder="Password baru"
+                                  className="w-full border-2 border-blue-300 rounded-xl px-3 py-2 text-sm font-bold text-slate-800 focus:outline-none focus:border-blue-600"
+                                />
+                              </td>
+                              <td className="p-3 text-xs font-bold text-slate-400 uppercase">
+                                {editAccountDept === "Majelis Jemaat" ? "Admin" : "Member"}
+                              </td>
+                              <td className="p-3 text-right">
+                                <div className="flex justify-end gap-2">
+                                  <button
+                                    onClick={() => handleSaveAccount(acc.id)}
+                                    className="text-white bg-blue-600 hover:bg-blue-700 p-2 rounded-xl shadow-sm"
+                                    title="Simpan"
+                                  >
+                                    <Check className="w-4 h-4" />
+                                  </button>
+                                  <button
+                                    onClick={cancelEditAccount}
+                                    className="text-slate-500 bg-slate-200 hover:bg-slate-300 p-2 rounded-xl shadow-sm"
+                                    title="Batal"
+                                  >
+                                    <X className="w-4 h-4" />
+                                  </button>
+                                </div>
+                              </td>
+                            </>
+                          ) : (
+                            <>
+                              <td className="p-3 font-bold text-slate-700">{acc.name}</td>
+                              <td className="p-3">
+                                <span className="bg-blue-100 text-blue-800 px-3 py-1 rounded-lg text-xs font-bold whitespace-nowrap">
+                                  {acc.department}
+                                </span>
+                              </td>
+                              <td className="p-3 font-mono text-slate-500">••••••••</td>
+                              <td className="p-3">
+                                {acc.role === 'admin' ? (
+                                  <span className="flex items-center gap-1.5 text-amber-700 bg-amber-50 border border-amber-200 px-2.5 py-1 rounded-lg text-xs font-bold w-fit">
+                                    <Shield className="w-3.5 h-3.5" /> Admin
+                                  </span>
+                                ) : (
+                                  <span className="flex items-center gap-1.5 text-blue-700 bg-blue-50 border border-blue-200 px-2.5 py-1 rounded-lg text-xs font-bold w-fit">
+                                    <Users className="w-3.5 h-3.5" /> Member
+                                  </span>
+                                )}
+                              </td>
+                              <td className="p-3 text-right">
+                                <div className="flex justify-end gap-2">
+                                  <button
+                                    onClick={() => openEditAccount(acc)}
+                                    className="text-slate-400 hover:text-blue-600 hover:bg-blue-100 p-2 rounded-xl transition shadow-sm bg-white border border-slate-200"
+                                    title="Edit Akun"
+                                  >
+                                    <Edit2 className="w-4 h-4" />
+                                  </button>
+                                  <button
+                                    onClick={() => handleDeleteAccount(acc)}
+                                    className="text-slate-400 hover:text-rose-600 hover:bg-rose-100 p-2 rounded-xl transition shadow-sm bg-white border border-slate-200"
+                                    title="Hapus Akun"
+                                  >
+                                    <Trash2 className="w-4 h-4" />
+                                  </button>
+                                </div>
+                              </td>
+                            </>
+                          )}
+                        </tr>
+                      ))
+                    )}
+                  </tbody>
+                </table>
+              </div>
+              <p className="text-xs text-slate-400 mt-4 font-medium">*Mengubah Badan Pelayan menjadi "Majelis Jemaat" otomatis menjadikan akun tersebut Admin.</p>
             </div>
           </div>
         )}
