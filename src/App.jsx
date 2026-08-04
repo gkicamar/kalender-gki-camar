@@ -467,15 +467,29 @@ export default function App() {
 
   const isAdmin = user && user.role === 'admin';
 
-  const displayEventsCalendar = selectedDate ? events.filter(ev => ev.date === selectedDate) : events;
-  
+  // Kalender: jika belum pilih tanggal tertentu, kegiatan yang sudah "Selesai" disembunyikan.
+  // Begitu satu tanggal diklik, seluruh kegiatan di tanggal itu ditampilkan (termasuk yang sudah selesai).
+  const displayEventsCalendar = selectedDate
+    ? events.filter(ev => ev.date === selectedDate)
+    : events.filter(ev => !isEventPast(ev.date, ev.endTime));
+
+  const hiddenPastCount = selectedDate ? 0 : events.length - displayEventsCalendar.length;
+
   // Filter Khusus Tabel: Berdasarkan Badan Pelayan dan Rentang Tanggal
+  // Kegiatan "Selesai" ikut disembunyikan kecuali user sudah memilih rentang tanggal (Dari/S.D.)
+  const isTableDateFiltered = !!(filterStartDate || filterEndDate);
   const displayEventsTable = events.filter(ev => {
     const matchDept = filterDept === 'Semua' || ev.department === filterDept;
     const matchStart = !filterStartDate || ev.date >= filterStartDate;
     const matchEnd = !filterEndDate || ev.date <= filterEndDate;
-    return matchDept && matchStart && matchEnd;
+    const matchPast = isTableDateFiltered || !isEventPast(ev.date, ev.endTime);
+    return matchDept && matchStart && matchEnd && matchPast;
   });
+
+  const hiddenPastTableCount = isTableDateFiltered ? 0 : events.filter(ev => {
+    const matchDept = filterDept === 'Semua' || ev.department === filterDept;
+    return matchDept && isEventPast(ev.date, ev.endTime);
+  }).length;
 
   const handlePrint = () => {
     window.print();
@@ -679,6 +693,12 @@ export default function App() {
                 <p className="text-sm text-slate-500 font-medium mt-1">
                   {selectedDate ? 'Menampilkan jadwal di tanggal terpilih.' : 'Sistem deteksi bentrok ruangan real-time.'}
                 </p>
+                {hiddenPastCount > 0 && (
+                  <p className="text-xs text-slate-400 font-semibold mt-1.5 flex items-center gap-1.5">
+                    <CheckCircle className="w-3.5 h-3.5" />
+                    {hiddenPastCount} kegiatan yang sudah selesai disembunyikan. Klik tanggalnya di kalender untuk melihat.
+                  </p>
+                )}
               </div>
 
               <div className="flex items-center gap-3">
@@ -711,7 +731,14 @@ export default function App() {
               {displayEventsCalendar.length === 0 ? (
                 <div className="col-span-full py-20 text-center text-slate-400 bg-white/50 rounded-3xl border-2 border-dashed border-blue-100">
                   <CalendarDays className="w-16 h-16 mx-auto mb-4 opacity-20 text-blue-800" />
-                  <p className="text-base font-bold text-slate-500">Tidak ada agenda di tanggal ini.</p>
+                  <p className="text-base font-bold text-slate-500">
+                    {selectedDate ? 'Tidak ada agenda di tanggal ini.' : 'Tidak ada agenda mendatang.'}
+                  </p>
+                  {!selectedDate && hiddenPastCount > 0 && (
+                    <p className="text-xs text-slate-400 font-semibold mt-2">
+                      Ada {hiddenPastCount} kegiatan yang sudah selesai. Klik tanggalnya di kalender untuk melihat.
+                    </p>
+                  )}
                 </div>
               ) : (
                 displayEventsCalendar.map((ev) => {
@@ -818,6 +845,12 @@ export default function App() {
                   <p className="text-sm text-rose-600 font-semibold mt-1">
                     *Apabila ada kekeliruan dalam jadwal, mohon dapat diberitahukan kepada Majelis Jemaat.
                   </p>
+                  {hiddenPastTableCount > 0 && (
+                    <p className="text-xs text-slate-400 font-semibold mt-1.5 flex items-center gap-1.5">
+                      <CheckCircle className="w-3.5 h-3.5" />
+                      {hiddenPastTableCount} kegiatan yang sudah selesai disembunyikan. Pilih rentang tanggal (Dari - S/D) untuk melihatnya.
+                    </p>
+                  )}
                 </div>
                 
                 {/* Header Actions & Filters */}
@@ -888,7 +921,11 @@ export default function App() {
                 <tbody className="divide-y divide-slate-100 print:divide-gray-300">
                   {displayEventsTable.length === 0 ? (
                     <tr>
-                      <td colSpan="6" className="p-10 text-center font-bold text-slate-400 text-base print:text-black">Belum ada data jadwal.</td>
+                      <td colSpan="6" className="p-10 text-center font-bold text-slate-400 text-base print:text-black">
+                        {hiddenPastTableCount > 0
+                          ? `Tidak ada kegiatan mendatang. (${hiddenPastTableCount} kegiatan selesai disembunyikan, pilih rentang tanggal untuk melihat)`
+                          : 'Belum ada data jadwal.'}
+                      </td>
                     </tr>
                   ) : (
                     displayEventsTable.map((ev) => {
