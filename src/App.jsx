@@ -70,7 +70,8 @@ const DEFAULT_ROOMS = [
   "Ruang Ibadah Remaja & Pemuda",
   "Ruang RPP Lantai 1",
   "Ruang RPP Lantai 2",
-  "Di luar gereja"
+  "Di luar gereja",
+  "Online - ZOOM Meeting"
 ];
 
 // Daftar Hari Libur Nasional
